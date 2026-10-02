@@ -1,0 +1,93 @@
+name: Build iPhone IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '*.swift'
+      - '*.plist'
+      - '*.entitlements'
+      - 'App/**'
+      - 'Shared/**'
+      - 'Extension/**'
+      - 'Tests/**'
+      - 'project.yml'
+      - '.github/workflows/build.yml'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore folders if files were uploaded individually
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import plistlib, shutil
+          mapping = {
+              'HKCallBlockerApp.swift': 'App',
+              'PhoneNumber.swift': 'Shared',
+              'BlockStore.swift': 'Shared',
+              'AppGroups.entitlements': 'Shared',
+              'CallDirectoryHandler.swift': 'Extension',
+              'main.swift': 'Tests',
+          }
+          for name, folder in mapping.items():
+              destination = Path(folder) / name
+              if not destination.exists():
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(name, destination)
+          for source in Path('.').glob('*.plist'):
+              data = plistlib.loads(source.read_bytes())
+              kind = data.get('CFBundlePackageType')
+              if kind not in ('APPL', 'XPC!'):
+                  continue
+              folder = 'Extension' if 'NSExtension' in data else 'App'
+              destination = Path(folder) / 'Info.plist'
+              if not destination.exists():
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(source, destination)
+          for folder in ('App', 'Extension'):
+              if not (Path(folder) / 'Info.plist').is_file():
+                  raise RuntimeError(f'Missing {folder}/Info.plist')
+          print('Source folders are ready.')
+          PY
+      - name: Check number normalization
+        run: |
+          set -euo pipefail
+          swiftc Shared/PhoneNumber.swift Tests/main.swift -o /tmp/check-phone-numbers
+          /tmp/check-phone-numbers
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          xcodegen generate
+      - name: Compile iPhone app and Call Directory extension
+        run: |
+          set -euo pipefail
+          xcodebuild -project HKCallBlocker.xcodeproj -scheme HKCallBlocker \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+      - name: Package unsigned IPA for re-signing
+        run: |
+          set -euo pipefail
+          APP=build/Build/Products/Release-iphoneos/HKCallBlocker.app
+          test -f "$APP/HKCallBlocker"
+          test -f "$APP/PlugIns/CallDirectory.appex/CallDirectory"
+          /usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APP/PlugIns/CallDirectory.appex/Info.plist" | grep -Fx 'com.apple.callkit.call-directory'
+          mkdir -p build/package/Payload
+          cp -R "$APP" build/package/Payload/
+          cp Shared/AppGroups.entitlements build/package/Required-AppGroups.entitlements
+          cd build/package
+          /usr/bin/zip -qry HKCallBlocker-unsigned.ipa Payload
+          unzip -t HKCallBlocker-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HKCallBlocker-unsigned
+          path: |
+            build/package/HKCallBlocker-unsigned.ipa
+            build/package/Required-AppGroups.entitlements
+          retention-days: 7
+          if-no-files-found: error
