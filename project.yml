@@ -1,0 +1,41 @@
+name: HKCallBlocker
+options:
+  bundleIdPrefix: com.kakorochan
+  deploymentTarget:
+    iOS: '18.0'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    TARGETED_DEVICE_FAMILY: '1'
+    MARKETING_VERSION: '1.0.0'
+    CURRENT_PROJECT_VERSION: '1'
+    CODE_SIGNING_ALLOWED: NO
+targets:
+  HKCallBlocker:
+    type: application
+    platform: iOS
+    sources: [App, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kakorochan.HKCallBlocker
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Shared/AppGroups.entitlements
+    dependencies:
+      - target: CallDirectory
+        embed: true
+  CallDirectory:
+    type: app-extension
+    platform: iOS
+    sources: [Extension, Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kakorochan.HKCallBlocker.CallDirectory
+        INFOPLIST_FILE: Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Shared/AppGroups.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+schemes:
+  HKCallBlocker:
+    build:
+      targets:
+        HKCallBlocker: all
