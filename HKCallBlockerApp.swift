@@ -21,7 +21,7 @@ enum Language: String, CaseIterable {
 }
 
 enum Notice {
-    case ready, saved, applied, duplicate, invalid, storage, reloadFailed, checking
+    case ready, saved, applied, duplicate, invalid, invalidName, storage, reloadFailed, checking
     func text(_ chinese: Bool) -> String {
         switch self {
         case .ready: return chinese ? "新增號碼後，按「套用封鎖名單」。" : "Add numbers, then tap Apply block list."
@@ -29,6 +29,7 @@ enum Notice {
         case .applied: return chinese ? "iOS 已成功載入封鎖名單。" : "iOS successfully loaded the block list."
         case .duplicate: return chinese ? "此號碼已在名單內。" : "This number is already on the list."
         case .invalid: return chinese ? "請輸入 8 位香港號碼，或以 +／00 開頭的完整國際號碼。" : "Enter an 8-digit Hong Kong number or a full international number beginning with + or 00."
+        case .invalidName: return chinese ? "請輸入名稱（最多 80 個字元）。" : "Enter a name of up to 80 characters."
         case .storage: return chinese ? "無法讀寫共用名單。請檢查主程式及擴充功能的 App Group 簽署設定。" : "Cannot access the shared list. Check App Group signing for both the app and extension."
         case .reloadFailed: return chinese ? "未能套用名單。請先在 iPhone 設定啟用擴充功能，並檢查簽署設定。" : "Could not apply the list. Enable the extension in iPhone Settings and check signing."
         case .checking: return chinese ? "正在套用…" : "Applying…"
@@ -38,7 +39,7 @@ enum Notice {
 
 @MainActor
 final class BlockModel: ObservableObject {
-    @Published var numbers: [Int64] = []
+    @Published var entries: [BlockStore.Entry] = []
     @Published var notice: Notice = .ready
     @Published var detail = ""
     @Published var storageOK = false
@@ -53,32 +54,44 @@ final class BlockModel: ObservableObject {
     func load() {
         do {
             let snapshot = try BlockStore.read()
-            numbers = snapshot.numbers
+            entries = snapshot.entries
             revision = snapshot.revision
             storageOK = true
         } catch { failStorage(error) }
     }
 
-    func add(_ input: String) -> Bool {
+    func add(_ input: String, name: String) -> Bool {
         guard storageOK, !busy else { return false }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, cleanName.count <= 80 else { notice = .invalidName; detail = ""; return false }
         do {
             let number = try PhoneNumber.normalize(input)
-            guard !numbers.contains(number) else { notice = .duplicate; detail = ""; return false }
-            return save(numbers + [number])
+            guard !entries.contains(where: { $0.number == number }) else { notice = .duplicate; detail = ""; return false }
+            return save(entries + [BlockStore.Entry(number: number, name: cleanName)])
         } catch { notice = .invalid; detail = ""; return false }
+    }
+
+    func rename(_ number: Int64, to name: String) -> Bool {
+        guard storageOK, !busy else { return false }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, cleanName.count <= 80 else { notice = .invalidName; detail = ""; return false }
+        var changed = entries
+        guard let index = changed.firstIndex(where: { $0.number == number }) else { return false }
+        changed[index].name = cleanName
+        return save(changed)
     }
 
     func remove(_ offsets: IndexSet) {
         guard storageOK, !busy else { return }
-        var changed = numbers
+        var changed = entries
         changed.remove(atOffsets: offsets)
         _ = save(changed)
     }
 
-    private func save(_ changed: [Int64]) -> Bool {
+    private func save(_ changed: [BlockStore.Entry]) -> Bool {
         do {
             let snapshot = try BlockStore.write(changed)
-            numbers = snapshot.numbers
+            entries = snapshot.entries
             revision = snapshot.revision
             notice = .saved
             detail = ""
@@ -130,6 +143,9 @@ struct ContentView: View {
     @StateObject private var model = BlockModel()
     @AppStorage("language") private var language: Language = .system
     @State private var input = ""
+    @State private var name = ""
+    @State private var editingNumber: Int64?
+    @State private var editedName = ""
     @FocusState private var entering: Bool
     @Environment(\.scenePhase) private var scenePhase
     private var zh: Bool { language.chinese }
@@ -145,14 +161,17 @@ struct ContentView: View {
                 }
                 Section {
                     Label(t("Local region: Hong Kong (+852)", "本地地區：香港（+852）"), systemImage: "globe")
+                    TextField(t("Name, e.g. Spam caller", "名稱，例如：推銷電話"), text: $name)
+                        .textInputAutocapitalization(.words)
+                        .accessibilityLabel(t("Name for this number", "此號碼的名稱"))
                     TextField(t("91234567 or +8613800138000", "91234567 或 +8613800138000"), text: $input)
                         .keyboardType(.phonePad)
                         .focused($entering)
                         .accessibilityLabel(t("Phone number", "電話號碼"))
                     Button(t("Add number", "新增號碼")) {
-                        if model.add(input) { input = ""; entering = false }
+                        if model.add(input, name: name) { input = ""; name = ""; entering = false }
                     }
-                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.storageOK || model.busy)
+                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.storageOK || model.busy)
                 } header: { Text(t("Add blocked number", "新增封鎖號碼")) }
                   footer: { Text(t("Without + or 00, enter exactly 8 digits. This blocks individual numbers, not whole countries.", "沒有 + 或 00 時，請輸入 8 位香港號碼。只封鎖指定完整號碼，不會封鎖整個國家。")) }
 
@@ -184,12 +203,23 @@ struct ContentView: View {
                 } header: { Text(t("Blocking status", "封鎖狀態")) }
 
                 Section {
-                    if model.numbers.isEmpty { Text(t("No blocked numbers", "尚未新增封鎖號碼")).foregroundStyle(.secondary) }
-                    ForEach(model.numbers, id: \.self) { number in
-                        Text("+\(String(number))").monospacedDigit()
+                    if model.entries.isEmpty { Text(t("No blocked numbers", "尚未新增封鎖號碼")).foregroundStyle(.secondary) }
+                    ForEach(model.entries) { entry in
+                        Button {
+                            editedName = entry.name
+                            editingNumber = entry.number
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.name.isEmpty ? t("Unnamed", "未命名") : entry.name)
+                                    .foregroundStyle(.primary)
+                                Text("+\(String(entry.number))")
+                                    .font(.subheadline).monospacedDigit().foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityLabel("\(entry.name), +\(entry.number)")
                     }.onDelete(perform: model.remove)
-                } header: { Text(t("Blocked numbers", "封鎖號碼") + " (\(model.numbers.count))") }
-                  footer: { Text(t("Swipe left to delete, then tap Apply. Removing the last number clears this app’s block list.", "向左滑動刪除，再按「套用」。刪除最後一個號碼並套用，會清除此應用程式的封鎖名單。")) }
+                } header: { Text(t("Blocked numbers", "封鎖號碼") + " (\(model.entries.count))") }
+                  footer: { Text(t("Tap to edit a name. Swipe left to delete. Then tap Apply.", "點按可修改名稱；向左滑動可刪除。完成後按「套用」。")) }
 
                 Section(t("Setup", "設定說明")) {
                     Text(t("In Settings → Apps → Phone → Call Blocking & Identification, enable HK Call Blocker. Return here and tap Apply.", "在「設定 → App → 電話 → 通話封鎖與識別」啟用 HK Call Blocker，然後返回此處按「套用」。"))
@@ -206,6 +236,17 @@ struct ContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await model.checkStatus() } }
             }
+            .alert(t("Edit name", "修改名稱"), isPresented: Binding(
+                get: { editingNumber != nil },
+                set: { if !$0 { editingNumber = nil } }
+            )) {
+                TextField(t("Name", "名稱"), text: $editedName)
+                Button(t("Cancel", "取消"), role: .cancel) { editingNumber = nil }
+                Button(t("Save", "儲存")) {
+                    if let number = editingNumber { _ = model.rename(number, to: editedName) }
+                    editingNumber = nil
+                }
+            } message: { Text(t("Name shown in your block list", "名稱會顯示在封鎖名單中")) }
         }
         .environment(\.locale, Locale(identifier: zh ? "zh-Hant" : "en"))
     }

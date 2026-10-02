@@ -20,4 +20,10 @@ for input in ["", "+", "123", "85291234567", "09123456", "+852123", "+0852912345
 }
 let equivalent = try ["91234567", "+85291234567", "0085291234567"].map(PhoneNumber.normalize)
 precondition(Set(equivalent).count == 1)
+let legacyJSON = #"{"revision":"00000000-0000-0000-0000-000000000001","numbers":[85291234567]}"#
+let migrated = try JSONDecoder().decode(BlockStore.Snapshot.self, from: Data(legacyJSON.utf8))
+precondition(migrated.entries == [BlockStore.Entry(number: 85291234567, name: "")])
+let named = BlockStore.Snapshot(revision: UUID(), entries: [BlockStore.Entry(number: 85291234567, name: "Spam caller")])
+let roundTrip = try JSONDecoder().decode(BlockStore.Snapshot.self, from: JSONEncoder().encode(named))
+precondition(roundTrip.entries == named.entries)
 print("Phone normalization checks passed.")
