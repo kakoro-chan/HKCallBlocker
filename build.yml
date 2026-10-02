@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths:
+      - '*.swift'
+      - '*.plist'
+      - '*.entitlements'
+      - '*.png'
       - 'App/**'
       - 'Shared/**'
       - 'Extension/**'
@@ -18,10 +22,48 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - name: Restore folders if files were uploaded individually
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import plistlib, shutil
+          mapping = {
+              'HKCallBlockerApp.swift': 'App',
+              'PhoneNumber.swift': 'Shared',
+              'BlockStore.swift': 'Shared',
+              'AppGroups.entitlements': 'Shared',
+              'CallDirectoryHandler.swift': 'Extension',
+              'main.swift': 'Tests',
+          }
+          for name, folder in mapping.items():
+              destination = Path(folder) / name
+              if not destination.exists():
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(name, destination)
+          for source in Path('.').glob('*.plist'):
+              data = plistlib.loads(source.read_bytes())
+              kind = data.get('CFBundlePackageType')
+              if kind not in ('APPL', 'XPC!'):
+                  continue
+              folder = 'Extension' if 'NSExtension' in data else 'App'
+              destination = Path(folder) / 'Info.plist'
+              if not destination.exists():
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(source, destination)
+          for folder in ('App', 'Extension'):
+              if not (Path(folder) / 'Info.plist').is_file():
+                  raise RuntimeError(f'Missing {folder}/Info.plist')
+          icon = Path('App/Assets.xcassets/AppIcon.appiconset')
+          if Path('AppIcon.png').is_file() and not (icon / 'AppIcon.png').is_file():
+              icon.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile('AppIcon.png', icon / 'AppIcon.png')
+              (icon / 'Contents.json').write_text('{"images":[{"filename":"AppIcon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}')
+          print('Source folders are ready.')
+          PY
       - name: Check number normalization
         run: |
           set -euo pipefail
-          swiftc Shared/PhoneNumber.swift Tests/main.swift -o /tmp/check-phone-numbers
+          swiftc Shared/PhoneNumber.swift Shared/BlockStore.swift Tests/main.swift -o /tmp/check-phone-numbers
           /tmp/check-phone-numbers
       - name: Generate Xcode project
         run: |
