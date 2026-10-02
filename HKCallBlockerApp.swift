@@ -94,7 +94,15 @@ final class BlockModel: ObservableObject {
 
     func checkStatus() async {
         do {
-            let status = try await CXCallDirectoryManager.sharedInstance.getEnabledStatusForExtension(withIdentifier: extensionID)
+            let status: CXCallDirectoryManager.EnabledStatus = try await withCheckedThrowingContinuation { continuation in
+                CXCallDirectoryManager.sharedInstance.getEnabledStatusForExtension(withIdentifier: extensionID) { status, error in
+                    if let error = error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: status)
+                    }
+                }
+            }
             enabled = status == .enabled ? true : (status == .disabled ? false : nil)
         } catch { enabled = nil }
     }
